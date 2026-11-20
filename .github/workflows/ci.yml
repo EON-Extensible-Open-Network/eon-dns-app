@@ -48,7 +48,7 @@ jobs:
         shell: pwsh
         run: |
           $d = Join-Path $env:RUNNER_TEMP 'eon-dns-system'
-          function Snapshot { Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { "{0}={1}" -f $_.ifIndex, ((Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4).ServerAddresses -join ',') } }
+          function Snapshot { Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { "{0}={1}" -f $_.ifIndex, ((Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ',') } }
           $before = Snapshot
           & target\debug\eon-dns.exe --system apply --data $d
           if ($LASTEXITCODE -ne 0) { Get-Content (Join-Path $d 'system-error.txt'); exit 1 }

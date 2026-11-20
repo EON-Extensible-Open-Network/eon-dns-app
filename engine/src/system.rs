@@ -120,13 +120,18 @@ pub fn set_script(adapters: &[Adapter], servers: &[&str]) -> String {
         .map(|s| quote(s))
         .collect::<Vec<_>>()
         .join(",");
-    let mut s = String::from("$ErrorActionPreference = 'Stop'\n");
+    // An adapter that cannot take the setting (no IPv4 on it, say) does not
+    // stop the others; failing on every one of them is an error.
+    let mut s = String::from("$ErrorActionPreference = 'Stop'\n$done = 0\n");
     for a in adapters {
         let _ = writeln!(
             s,
-            "Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses @({list})\n",
+            "try {{ Set-DnsClientServerAddress -InterfaceIndex {} -ServerAddresses @({list}); $done++ }} catch {{ }}",
             a.index
         );
+    }
+    if !adapters.is_empty() {
+        s.push_str("if ($done -eq 0) { throw 'no network adapter took the setting' }\n");
     }
     s.push_str("Clear-DnsClientCache\n");
     s
@@ -280,7 +285,8 @@ mod tests {
     #[test]
     fn applying_names_every_adapter_and_quotes_safely() {
         let s = set_script(&adapters(), &["127.0.0.1", "::1"]);
-        assert!(s.contains("-InterfaceIndex 7 -ServerAddresses @('127.0.0.1','::1')"));
+        assert!(s.contains("-InterfaceIndex 7 -ServerAddresses @('127.0.0.1','::1'); $done++"));
+        assert!(s.contains("throw 'no network adapter took the setting'"));
         assert!(s.contains("-InterfaceIndex 12 "));
         assert_eq!(quote("it's"), "'it''s'");
     }
