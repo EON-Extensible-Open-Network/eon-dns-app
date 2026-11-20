@@ -11,6 +11,7 @@
 
 import { spawn } from "node:child_process";
 import { createSocket } from "node:dgram";
+import { createServer } from "node:net";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +21,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const data = mkdtempSync(join(tmpdir(), "eon-dns-ui-"));
 if (shots) mkdirSync(shots, { recursive: true });
 const cdpPort = 9500 + Math.floor(Math.random() * 300);
-const dnsPort = 15300 + Math.floor(Math.random() * 300);
+/** A port that both UDP and TCP can bind on loopback: Windows reserves ranges. */
+async function freePort() {
+  for (let i = 0; i < 50; i++) {
+    const port = 15300 + Math.floor(Math.random() * 2000);
+    const ok = await new Promise((done) => {
+      const tcp = createServer().once("error", () => done(false)).listen(port, "127.0.0.1", () => {
+        const udp = createSocket("udp4").once("error", () => { tcp.close(); done(false); });
+        udp.bind(port, "127.0.0.1", () => { udp.close(); tcp.close(); done(true); });
+      });
+    });
+    if (ok) return port;
+  }
+  throw new Error("no free port");
+}
+const dnsPort = await freePort();
 writeFileSync(join(data, "settings.json"), JSON.stringify({ language: "en", close_to_tray: false }));
 const app = spawn(exe, [], {
   env: { ...process.env, EON_DNS_DATA: data, EON_DNS_PORT: String(dnsPort), EON_DNS_NO_SYSTEM: "1", EON_WEBVIEW_ARGS: `--remote-debugging-port=${cdpPort}` },

@@ -81,6 +81,7 @@ fn ask(port: u16, name: &str) -> Option<Message> {
     Message::from_vec(&buf[..n]).ok()
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn run() -> String {
     let mut out = format!("EON DNS {} selftest\n", env!("CARGO_PKG_VERSION"));
     let mut failures = 0;
@@ -122,10 +123,6 @@ pub fn run() -> String {
     // The resolver, end to end on loopback, with a stand-in upstream.
     let data = std::env::temp_dir().join(format!("eon-dns-selftest-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&data);
-    let port = UdpSocket::bind("127.0.0.1:0")
-        .ok()
-        .and_then(|s| s.local_addr().ok())
-        .map_or(0, |a| a.port());
     match stand_in_upstream() {
         Some(up) => {
             let settings = Settings {
@@ -136,7 +133,20 @@ pub fn run() -> String {
                 race: 1,
                 ..Settings::default()
             };
-            match Engine::start(&settings, &data, port) {
+            // A free port, and one Windows has not reserved: try a few.
+            let mut started = Err("no port".to_owned());
+            let mut port = 0;
+            for _ in 0..20 {
+                port = UdpSocket::bind("127.0.0.1:0")
+                    .ok()
+                    .and_then(|s| s.local_addr().ok())
+                    .map_or(0, |a| a.port());
+                started = Engine::start(&settings, &data, port);
+                if started.is_ok() {
+                    break;
+                }
+            }
+            match started {
                 Ok(engine) => {
                     let a = ask(port, "example.test.");
                     line(
