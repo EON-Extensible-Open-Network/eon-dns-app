@@ -40,6 +40,28 @@ jobs:
         run: |
           target/debug/eon-dns${{ runner.os == 'Windows' && '.exe' || '' }} --selftest report.txt || { cat report.txt; exit 1; }
           cat report.txt
+      # The step that changes the system, for real, where that is harmless: point
+      # the runner's adapters at 127.0.0.1, check, then put them back and check
+      # they are exactly as before (plan madde 47d).
+      - name: Apply and restore the system's DNS (runner only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'eon-dns-system'
+          function Snapshot { Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { "{0}={1}" -f $_.ifIndex, ((Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4).ServerAddresses -join ',') } }
+          $before = Snapshot
+          & target\debug\eon-dns.exe --system apply --data $d
+          if ($LASTEXITCODE -ne 0) { Get-Content (Join-Path $d 'system-error.txt'); exit 1 }
+          $during = Snapshot
+          Write-Output "before: $before"; Write-Output "during: $during"
+          if (-not ($during | Where-Object { $_ -match '=127\.0\.0\.1' })) { Write-Output '::error::apply did not point the adapters at 127.0.0.1'; exit 1 }
+          if (-not (Test-Path (Join-Path $d 'system-previous.json'))) { Write-Output '::error::no record of the previous settings'; exit 1 }
+          & target\debug\eon-dns.exe --system restore --data $d
+          if ($LASTEXITCODE -ne 0) { Get-Content (Join-Path $d 'system-error.txt'); exit 1 }
+          $after = Snapshot
+          Write-Output "after:  $after"
+          if (($before -join ';') -ne ($after -join ';')) { Write-Output '::error::restore did not put the adapters back as they were'; exit 1 }
+          if (Test-Path (Join-Path $d 'system-previous.json')) { Write-Output '::error::the record outlived the restore'; exit 1 }
       - uses: actions/setup-node@v4
         if: runner.os == 'Windows'
         with:
