@@ -5,6 +5,16 @@ SPDX-FileCopyrightText: 2026 EON contributors
 
 # Changelog
 
+## v0.0.1 — 21 November 2026
+
+### Fixed
+- **Turning protection on failed on computers with a network adapter that cannot take
+  a DNS setting.** A virtual adapter with no IPv4 is one example, and many Windows
+  machines have one. Such an adapter is now skipped, and turning on fails only if no
+  adapter took the setting. Found by the new CI step that applies and restores the
+  system's DNS for real on the Windows runner: two adapters pointed at `127.0.0.1`, then
+  put back exactly as they were.
+
 ## v0.0.0 — 21 November 2026
 
 The first alpha: the encrypted-DNS half of plan madde 47.
