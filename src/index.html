@@ -1,0 +1,153 @@
+<!doctype html>
+<!--
+SPDX-License-Identifier: GPL-3.0-or-later
+SPDX-FileCopyrightText: 2026 EON contributors
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EON DNS</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="brand" data-tauri-drag-region>
+      <img src="icon.png" alt="" width="22" height="22">
+      <span data-tauri-drag-region>EON DNS</span>
+    </div>
+    <nav class="tabs" data-i18n-label="nav.label" aria-label="Sections">
+      <button type="button" data-view="overview" aria-current="page" data-i18n="nav.overview">Overview</button>
+      <button type="button" data-view="protection" data-i18n="nav.protection">Protection</button>
+      <button type="button" data-view="resolvers" data-i18n="nav.resolvers">Resolvers</button>
+      <button type="button" data-view="log" data-i18n="nav.log">Log</button>
+      <button type="button" data-view="settings" data-i18n="nav.settings">Settings</button>
+    </nav>
+    <div class="window-controls">
+      <button type="button" id="win-min" class="ghost" data-i18n-label="window.minimize" aria-label="Minimize"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8"/></svg></button>
+      <button type="button" id="win-max" class="ghost" data-i18n-label="window.maximize" aria-label="Maximize"><svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.5" y="2.5" width="7" height="7" rx="1"/></svg></button>
+      <button type="button" id="win-close" class="ghost close" data-i18n-label="window.close" aria-label="Close"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6"/></svg></button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Overview: the switch is the screen. -->
+    <section id="view-overview" class="view overview">
+      <div class="dial-wrap">
+        <svg id="ring" class="ring" viewBox="0 0 400 400" aria-hidden="true"></svg>
+        <button type="button" id="switch" class="switch" role="switch" aria-checked="false">
+          <span id="switch-state" class="switch-state">Off</span>
+          <span id="switch-hint" class="switch-hint"></span>
+        </button>
+      </div>
+      <div class="readout">
+        <p id="route" class="route"></p>
+        <p id="problem" class="problem" role="alert" hidden></p>
+        <dl class="figures">
+          <div><dt data-i18n="fig.lookups">Lookups</dt><dd id="fig-lookups">0</dd></div>
+          <div><dt data-i18n="fig.blocked">Blocked</dt><dd id="fig-blocked" class="warm">0</dd></div>
+          <div><dt data-i18n="fig.speed">Typical answer</dt><dd id="fig-speed">–</dd></div>
+        </dl>
+        <p id="ring-caption" class="caption" data-i18n="ring.caption">The ring is the last hour, one tick a minute; amber is what was blocked.</p>
+        <div class="recent">
+          <h2 data-i18n="recent.title">Recently blocked</h2>
+          <ol id="recent" class="recent-list"></ol>
+          <p id="recent-empty" class="note"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Protection: the lists, the person's own rules, and "why?". -->
+    <section id="view-protection" class="view" hidden>
+      <h1 data-i18n="protection.title">What gets blocked</h1>
+      <p class="lede" data-i18n="protection.lede">Blocking happens on this computer, from published open lists and your own rules. A blocked name is answered with nothing, so it fails at once instead of loading.</p>
+      <div id="lists" class="rows"></div>
+      <div class="two">
+        <div class="rule-box">
+          <h2 data-i18n="rules.allow">Always allow</h2>
+          <p class="note" data-i18n="rules.allowhint">Wins over every list. Covers subdomains too.</p>
+          <form class="rule-add" data-rule="allow"><label class="sr-only" for="allow-input" data-i18n="rules.allow">Always allow</label><input id="allow-input" spellcheck="false" placeholder="example.com"><button type="submit" class="ghost" data-i18n="rules.add">Add</button></form>
+          <ul id="allow-list" class="chips"></ul>
+        </div>
+        <div class="rule-box">
+          <h2 data-i18n="rules.block">Always block</h2>
+          <p class="note" data-i18n="rules.blockhint">Blocked whether or not a list has it.</p>
+          <form class="rule-add" data-rule="block"><label class="sr-only" for="block-input" data-i18n="rules.block">Always block</label><input id="block-input" spellcheck="false" placeholder="example.com"><button type="submit" class="ghost" data-i18n="rules.add">Add</button></form>
+          <ul id="block-list" class="chips"></ul>
+        </div>
+      </div>
+      <form id="why-form" class="why">
+        <label for="why-input" data-i18n="why.label">Why is a name blocked, or not?</label>
+        <div class="why-row"><input id="why-input" spellcheck="false" placeholder="ads.example.com"><button type="submit" class="ghost" data-i18n="why.check">Check</button></div>
+        <p id="why-answer" class="note" role="status"></p>
+      </form>
+    </section>
+
+    <!-- Resolvers: where lookups go, how, and how fast from here. -->
+    <section id="view-resolvers" class="view" hidden>
+      <h1 data-i18n="resolvers.title">Where lookups go</h1>
+      <p class="lede" data-i18n="resolvers.lede">Choose who answers. Several are asked at once and the first good answer wins. EON runs no resolver of its own.</p>
+      <fieldset class="mode">
+        <legend data-i18n="mode.title">How the computer uses EON DNS</legend>
+        <label class="mode-option"><input type="radio" name="mode" value="local"><span><strong data-i18n="mode.local">EON's resolver on this computer</strong><span class="note" data-i18n="mode.localhint">Encrypts, blocks, counts and checks signatures here. EON DNS stays running in the tray.</span></span></label>
+        <label class="mode-option"><input type="radio" name="mode" value="native"><span><strong data-i18n="mode.native">Windows' own encrypted DNS</strong><span class="note" data-i18n="mode.nativehint">Windows encrypts lookups to one resolver and keeps doing so with EON DNS closed. No blocking or counters.</span></span></label>
+      </fieldset>
+      <div id="presets" class="rows"></div>
+      <div class="controls">
+        <label class="field"><span data-i18n="transport.title">Encryption</span>
+          <select id="transport">
+            <option value="https" data-i18n="transport.https">DNS over HTTPS</option>
+            <option value="tls" data-i18n="transport.tls">DNS over TLS</option>
+            <option value="quic" data-i18n="transport.quic">DNS over QUIC (where offered)</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="validate"><span data-i18n="dnssec.check">Check DNSSEC signatures on this computer</span></label>
+      </div>
+      <div class="bench">
+        <button type="button" id="bench-run" class="primary"><svg class="icon" aria-hidden="true"><use href="icons.svg#i-gauge"></use></svg><span data-i18n="bench.run">Time them from here</span></button>
+        <p class="note" data-i18n="bench.hint">Twelve real lookups to each resolver, from this connection. Takes a few seconds.</p>
+        <ol id="bench-results" class="bench-results"></ol>
+      </div>
+    </section>
+
+    <!-- Log: off until asked, kept in memory only. -->
+    <section id="view-log" class="view" hidden>
+      <div class="log-head">
+        <div>
+          <h1 data-i18n="log.title">Lookups</h1>
+          <p class="lede" data-i18n="log.lede">The last 500 lookups, kept in memory only and gone when EON DNS stops. Off unless you switch it on.</p>
+        </div>
+        <label class="check"><input type="checkbox" id="log-on"><span data-i18n="log.on">Keep the log</span></label>
+      </div>
+      <div class="log-tools">
+        <label class="sr-only" for="log-filter" data-i18n="log.filter">Filter</label>
+        <input id="log-filter" spellcheck="false" data-i18n-placeholder="log.filter" placeholder="Filter">
+        <label class="check"><input type="checkbox" id="log-blocked"><span data-i18n="log.blockedonly">Blocked only</span></label>
+        <button type="button" id="log-clear" class="ghost"><svg class="icon" aria-hidden="true"><use href="icons.svg#i-trash-2"></use></svg><span data-i18n="log.clear">Clear</span></button>
+      </div>
+      <table class="log">
+        <thead><tr><th data-i18n="log.time">Time</th><th data-i18n="log.name">Name</th><th data-i18n="log.type">Type</th><th data-i18n="log.result">Result</th><th class="num" data-i18n="log.ms">ms</th><th><span class="sr-only" data-i18n="log.actions">Actions</span></th></tr></thead>
+        <tbody id="log-body"></tbody>
+      </table>
+      <p id="log-empty" class="note"></p>
+    </section>
+
+    <!-- Settings. -->
+    <section id="view-settings" class="view" hidden>
+      <h1 data-i18n="settings.title">Settings</h1>
+      <div class="rows">
+        <label class="row setting"><span data-i18n="settings.language">Language</span><select id="language"><option value="en">English</option><option value="tr">Türkçe</option></select></label>
+        <label class="row setting"><span data-i18n="settings.tray">Keep running in the tray when the window closes</span><input type="checkbox" id="close-to-tray"></label>
+        <label class="row setting"><span data-i18n="settings.cache">Answers kept in the cache</span><select id="cache"><option value="1024">1 000</option><option value="4096">4 000</option><option value="16384">16 000</option></select></label>
+      </div>
+      <div class="about">
+        <h2 data-i18n="about.title">About</h2>
+        <p id="about-version" class="note"></p>
+        <p class="note" data-i18n="about.nothing">EON DNS reports nothing anywhere. No account, no telemetry; the only things that leave this computer are the lookups themselves, encrypted, to the resolvers you chose, and the open lists it downloads.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

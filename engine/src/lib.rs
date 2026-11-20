@@ -92,6 +92,16 @@ pub struct Engine {
     pub port: u16,
 }
 
+/// Runs `work` on a thread of its own. The engine blocks on its runtime in a
+/// few places, and a caller may itself be inside an async runtime (a Tauri
+/// command is), where blocking would panic.
+fn on_own_thread<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| match s.spawn(work).join() {
+        Ok(v) => v,
+        Err(panic) => std::panic::resume_unwind(panic),
+    })
+}
+
 fn build_filter(data: &Path, settings: &Settings) -> Filter {
     let mut filter = Filter::default();
     for list in &settings.lists {
@@ -135,11 +145,13 @@ impl Engine {
         let mut bound = 0;
         let mut first_error = None;
         for (i, addr) in server::addresses(port).into_iter().enumerate() {
-            let sockets = runtime.block_on(async {
-                Ok::<_, std::io::Error>((
-                    UdpSocket::bind(addr).await?,
-                    TcpListener::bind(addr).await?,
-                ))
+            let sockets = on_own_thread(|| {
+                runtime.block_on(async {
+                    Ok::<_, std::io::Error>((
+                        UdpSocket::bind(addr).await?,
+                        TcpListener::bind(addr).await?,
+                    ))
+                })
             });
             match sockets {
                 Ok((udp, tcp)) => {
@@ -188,9 +200,10 @@ impl Engine {
     ) -> Vec<(List, Result<usize, String>)> {
         let data = self.shared.data.clone();
         let wanted = settings.lists.clone();
-        let results = self
-            .runtime
-            .block_on(async move { lists::refresh(&data, &wanted, force).await });
+        let results = on_own_thread(|| {
+            self.runtime
+                .block_on(async move { lists::refresh(&data, &wanted, force).await })
+        });
         if let Ok(mut f) = self.shared.filter.write() {
             *f = build_filter(&self.shared.data, settings);
         }
@@ -232,8 +245,8 @@ impl Engine {
 
     /// Times each candidate from this connection (see [`bench`]).
     pub fn benchmark(&self, candidates: &[Upstream], transport: Transport) -> Vec<bench::Score> {
-        self.runtime
-            .block_on(bench::run(candidates.to_vec(), transport))
+        let candidates = candidates.to_vec();
+        on_own_thread(|| self.runtime.block_on(bench::run(candidates, transport)))
     }
 
     /// Stops listening. The system's DNS settings are the application's to restore.

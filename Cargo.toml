@@ -5,7 +5,7 @@
 # dependency (as eon-stream-core is). `src-tauri/` is the window over it, `src/`
 # the interface (static HTML, CSS, JavaScript; no Node, no bundler).
 [workspace]
-members = ["engine"]
+members = ["engine", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
