@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "eon-dns"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "eon-dns-engine",
  "hickory-resolver",
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "eon-dns-engine"
-version = "0.0.1-alpha"
+version = "0.0.2-alpha"
 dependencies = [
  "base64 0.22.1",
  "hickory-resolver",
