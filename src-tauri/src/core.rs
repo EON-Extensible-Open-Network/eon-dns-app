@@ -157,6 +157,12 @@ pub struct Core {
     #[cfg(windows)]
     tunnel: Mutex<Option<tunnel::windows::Tunnel>>,
     problem: Mutex<Option<String>>,
+    /// Held by whatever changes the system (the switch, the service's
+    /// checks, stopping), so two never interleave; `true` once the service is
+    /// stopping, after which the checks change nothing. Without it a check
+    /// that began before the stop pointed the adapters back at EON after the
+    /// stop had put them back (CI caught it).
+    changing: Mutex<bool>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -193,6 +199,7 @@ impl Core {
             #[cfg(windows)]
             tunnel: Mutex::new(None),
             problem: Mutex::new(None),
+            changing: Mutex::new(false),
         }
     }
 
@@ -311,6 +318,7 @@ impl Core {
     /// Connects in the chosen mode, or disconnects. Connecting when already
     /// connected reconnects: a change of mode takes effect at once.
     pub fn set_on(&self, on: bool) -> Result<(), String> {
+        let _changing = lock(&self.changing);
         *lock(&self.problem) = None;
         let mode = self.settings().mode;
         let result = if on {
@@ -401,6 +409,10 @@ impl Core {
     /// joining later): the service calls this every few seconds.
     #[cfg(windows)]
     pub fn keep_applied(&self) {
+        let stopping = lock(&self.changing);
+        if *stopping {
+            return;
+        }
         let s = self.settings();
         if !self.system_allowed || !s.on || s.mode == Mode::Native || lock(&self.engine).is_none() {
             return;
@@ -450,7 +462,12 @@ impl Core {
     /// tried again on the next check instead of turning protection off.
     #[cfg(windows)]
     pub fn rebuild_tunnel(&self) {
-        let mode = self.settings().mode;
+        let stopping = lock(&self.changing);
+        let s = self.settings();
+        if *stopping || !s.on || !s.mode.tunnels() {
+            return;
+        }
+        let mode = s.mode;
         self.tunnel_down();
         *lock(&self.problem) = self.tunnel_up(mode).err();
     }
@@ -459,6 +476,8 @@ impl Core {
     /// switch's position so the next start reconnects.
     #[cfg_attr(not(windows), allow(dead_code))] // only the Windows service stops this way
     pub fn shutdown(&self) {
+        let mut stopping = lock(&self.changing);
+        *stopping = true;
         let on = self.settings().on;
         let _ = self.disconnect();
         let mut s = lock(&self.settings);
