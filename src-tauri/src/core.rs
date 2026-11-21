@@ -399,6 +399,7 @@ impl Core {
 
     /// Covers adapters that came up after protection was turned on (Wi-Fi
     /// joining later): the service calls this every few seconds.
+    #[cfg(windows)]
     pub fn keep_applied(&self) {
         let s = self.settings();
         if !self.system_allowed || !s.on || s.mode == Mode::Native || lock(&self.engine).is_none() {
