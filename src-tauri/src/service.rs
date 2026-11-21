@@ -129,15 +129,7 @@ pub fn install() -> Result<(), String> {
     let dir = program_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let target = dir.join("eon-dns.exe");
-    if installed() {
-        let _ = sc(&["stop", NAME]);
-        for _ in 0..40 {
-            if sc(&["query", NAME]).is_ok_and(|t| t.contains("STOPPED")) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-    }
+    stop_and_wait()?;
     // Before the service, the window kept its settings and the record of
     // the computer's own DNS in the person's folder (v0.0.0, v0.0.1). The
     // service reads ProgramData, so both move there once, or the record that
@@ -196,7 +188,23 @@ pub fn install() -> Result<(), String> {
 /// `--uninstall-service`, run elevated: stop it (which puts the computer's
 /// DNS back) and remove it.
 pub fn uninstall() -> Result<(), String> {
-    let _ = sc(&["stop", NAME]);
-    std::thread::sleep(Duration::from_secs(2));
+    stop_and_wait()?;
     sc(&["delete", NAME]).map(|_| ())
+}
+
+/// Stops the service and waits until it has: stopping puts the computer's
+/// DNS back, which takes a few seconds, and nothing may happen before that
+/// is done (deleting, replacing the program).
+fn stop_and_wait() -> Result<(), String> {
+    if !installed() {
+        return Ok(());
+    }
+    let _ = sc(&["stop", NAME]);
+    for _ in 0..120 {
+        if sc(&["query", NAME]).is_ok_and(|t| t.contains("STOPPED")) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err("the EON DNS service did not stop".into())
 }
