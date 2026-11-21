@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 EON contributors
+
+# Proper names the doc lint would otherwise want in backticks.
+doc-valid-idents = ["WireGuard", "DoH", "DoT", "DoQ", "IPv4", "IPv6", ".."]

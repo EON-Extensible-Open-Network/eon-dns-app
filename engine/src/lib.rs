@@ -12,7 +12,7 @@
 //! Nothing here reports anywhere (madde 36). The log is in memory and off by
 //! default.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod bench;
 pub mod filter;
@@ -20,6 +20,7 @@ pub mod lists;
 pub mod server;
 pub mod stats;
 pub mod system;
+pub mod tunnel;
 pub mod upstream;
 
 use std::path::{Path, PathBuf};
@@ -64,7 +65,7 @@ impl Default for Settings {
                 Upstream::Preset { id: "quad9".into() },
             ],
             transport: Transport::Https,
-            validate: true,
+            validate: false,
             lists: vec![List::Threats],
             allow: Vec::new(),
             block: Vec::new(),

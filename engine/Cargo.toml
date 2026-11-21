@@ -20,9 +20,26 @@ hickory-resolver = { version = "0.26", features = ["https-ring", "tls-ring", "qu
 # The listeners and the resolver's I/O.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 # Fetching the published filter lists over HTTPS (rustls, no system TLS).
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
+# The tunnel (madde 47e): WireGuard keys, and the WARP client API, which answers
+# only TLS 1.2 (rustls with ring, the provider already in the tree).
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = "0.22"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+# Checking the WireGuard driver download against its pinned SHA-256.
+sha2 = "0.10"
 serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+# WireGuard's own signed kernel driver, through its maintained Rust bindings:
+# the packets never pass through this program, which only configures it.
+wireguard-nt = "0.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [lints]
 workspace = true

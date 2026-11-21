@@ -4,29 +4,39 @@
 // Additional permission under GNU GPL version 3 section 7:
 // see LICENSE-EXCEPTION.md (EON Module ABI Exception 1.0).
 
-//! EON DNS: the window and the tray over the engine (plan madde 47).
+//! EON DNS: the window and the tray (plan madde 47).
+//!
+//! On Windows the work is done by the EON DNS service (`--service`), which
+//! has the rights changing the system needs; the window asks it over
+//! `control` and is installed with it once, through one consent prompt.
+//! Elsewhere, and whenever `EON_DNS_NO_SYSTEM` is set (tests), the window
+//! runs the same core itself and never touches the system.
 //!
 //! The interface has no network and no plugin; everything it does is one of
-//! the commands below. Changing the system's DNS needs administrator rights,
-//! so this program runs itself elevated for that one step (`--system ...`),
-//! which does it and exits.
+//! the commands below.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![deny(unsafe_code)]
 
+mod control;
+mod core;
 mod selftest;
+#[cfg(windows)]
+#[allow(unsafe_code)] // the service entry point the system calls; see service.rs
+mod service;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use eon_dns_engine::filter::List;
-use eon_dns_engine::upstream::{Transport, Upstream, PRESETS};
-use eon_dns_engine::{system, Engine, Settings};
-use serde::{Deserialize, Serialize};
+use eon_dns_engine::system;
+use eon_dns_engine::upstream::Transport;
 use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
+
+use crate::core::{Core, Request};
 
 pub const EN: &str = include_str!("../i18n/en.json");
 pub const TR: &str = include_str!("../i18n/tr.json");
@@ -44,68 +54,20 @@ pub const COMMANDS: &[&str] = &[
     "refresh_lists",
     "benchmark",
     "explain",
+    "warp_reset",
+    "diagnostics",
 ];
 
-/// How the system is pointed at EON DNS.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-enum Mode {
-    /// EON's own resolver on this computer: encryption, filtering, counters.
-    #[default]
-    Local,
-    /// Windows 11's built-in encrypted DNS, to one preset. Works with EON DNS closed.
-    Native,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-struct AppSettings {
-    engine: Settings,
-    on: bool,
-    mode: Mode,
-    native_preset: String,
-    language: String,
-    close_to_tray: bool,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            engine: Settings::default(),
-            on: false,
-            mode: Mode::Local,
-            native_preset: "cloudflare".into(),
-            language: String::new(),
-            close_to_tray: true,
-        }
-    }
-}
-
-impl AppSettings {
-    fn load(data: &Path) -> Self {
-        std::fs::read_to_string(data.join("settings.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
-    }
-
-    fn save(&self, data: &Path) {
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::create_dir_all(data);
-            let tmp = data.join("settings.json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(tmp, data.join("settings.json"));
-            }
-        }
-    }
+/// Who does the work.
+enum Backend {
+    /// This process, never touching the system (non-Windows, tests).
+    Here(Arc<Core>),
+    /// The EON DNS service, over `control`.
+    Service(PathBuf),
 }
 
 struct App {
-    data: PathBuf,
-    settings: Mutex<AppSettings>,
-    engine: Mutex<Option<Engine>>,
-    /// The last thing that went wrong turning protection on or off, as a key.
-    problem: Mutex<Option<String>>,
+    backend: Backend,
     lang: Mutex<String>,
 }
 
@@ -115,8 +77,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Where this program keeps its settings and lists: the per-user data folder.
-fn data_dir() -> PathBuf {
+/// The window's own data folder (embedded mode): per person.
+fn user_data() -> PathBuf {
     if let Some(d) = std::env::var_os("EON_DNS_DATA") {
         return PathBuf::from(d);
     }
@@ -136,7 +98,6 @@ fn data_dir() -> PathBuf {
     base.join("EON").join("DNS")
 }
 
-/// The port the local resolver answers on: 53, or another for tests.
 fn port() -> u16 {
     std::env::var("EON_DNS_PORT")
         .ok()
@@ -144,9 +105,66 @@ fn port() -> u16 {
         .unwrap_or(53)
 }
 
-/// Tests set this so the system's DNS is never touched.
-fn system_allowed() -> bool {
-    std::env::var_os("EON_DNS_NO_SYSTEM").is_none()
+fn uses_service() -> bool {
+    cfg!(windows) && std::env::var_os("EON_DNS_NO_SYSTEM").is_none()
+}
+
+/// How long the window waits for an answer: connecting can fetch a driver
+/// and register with WARP.
+fn wait_for(request: &Request) -> Duration {
+    match request {
+        Request::Turn { .. } | Request::SaveSettings { .. } | Request::WarpReset => {
+            Duration::from_secs(90)
+        }
+        Request::Benchmark { .. } | Request::RefreshLists => Duration::from_secs(120),
+        _ => Duration::from_secs(10),
+    }
+}
+
+impl App {
+    fn ask(&self, request: Request) -> Result<Value, String> {
+        match &self.backend {
+            Backend::Here(core) => core.handle(request),
+            Backend::Service(data) => {
+                let wait = wait_for(&request);
+                control::ask(data, &request, wait)
+                    .unwrap_or_else(|| Err("problem.noservice".into()))
+            }
+        }
+    }
+
+    /// Installs (or updates) the service through one consent prompt, then
+    /// waits for it to answer.
+    fn install_service(&self) -> Result<(), String> {
+        let Backend::Service(data) = &self.backend else {
+            return Ok(());
+        };
+        match system::run_elevated(&["--install-service"]) {
+            Ok(_) => {}
+            Err(e) if e == "cancelled" => return Err("problem.cancelled".into()),
+            Err(e) => return Err(e),
+        }
+        for _ in 0..60 {
+            if control::ask(data, &Request::Boot, Duration::from_secs(3)).is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        Err("problem.noservice".into())
+    }
+
+    /// Asks, installing the service first when it is missing or older than this window.
+    fn ask_or_install(&self, request: Request) -> Result<Value, String> {
+        if let Backend::Service(data) = &self.backend {
+            let current = control::ask(data, &Request::Boot, Duration::from_secs(5))
+                .and_then(Result::ok)
+                .is_some_and(|b| b["version"].as_str() == Some(env!("CARGO_PKG_VERSION")));
+            if !current {
+                self.install_service()?;
+            }
+        }
+        self.ask(request)
+    }
 }
 
 fn text(app: &tauri::AppHandle, key: &str) -> String {
@@ -156,118 +174,6 @@ fn text(app: &tauri::AppHandle, key: &str) -> String {
     let catalogue: Value =
         serde_json::from_str(if lang == "tr" { TR } else { EN }).unwrap_or(Value::Null);
     catalogue[key].as_str().unwrap_or(key).to_owned()
-}
-
-/// Runs `--system <args>` elevated and reports what the elevated run wrote.
-fn elevated(data: &Path, args: &[&str]) -> Result<(), String> {
-    let data_text = data.to_string_lossy().into_owned();
-    let mut all: Vec<&str> = vec!["--system"];
-    all.extend_from_slice(args);
-    all.extend_from_slice(&["--data", &data_text]);
-    let _ = std::fs::remove_file(data.join("system-error.txt"));
-    match system::run_elevated(&all) {
-        Ok(_) => match std::fs::read_to_string(data.join("system-error.txt")) {
-            Ok(e) if !e.trim().is_empty() => Err(e),
-            _ => Ok(()),
-        },
-        Err(e) if e == "cancelled" => Err("problem.cancelled".into()),
-        Err(e) => Err(e),
-    }
-}
-
-fn state_view(app: &App) -> Value {
-    let s = lock(&app.settings).clone();
-    let running = lock(&app.engine).as_ref().map(|e| e.port);
-    json!({
-        "on": s.on,
-        "mode": s.mode,
-        "running": running,
-        "in_charge": system::in_charge(&app.data).map(|p| p.mode),
-        "problem": lock(&app.problem).clone(),
-        "system_allowed": system_allowed(),
-    })
-}
-
-/// Starts the local resolver if it is not running.
-fn start_engine(app: &App) -> Result<(), String> {
-    let mut engine = lock(&app.engine);
-    if engine.is_none() {
-        let settings = lock(&app.settings).engine.clone();
-        *engine = Some(Engine::start(&settings, &app.data, port()).map_err(|e| {
-            if e.contains("10048") || e.to_lowercase().contains("in use") {
-                "problem.port".to_owned()
-            } else {
-                e
-            }
-        })?);
-    }
-    Ok(())
-}
-
-fn stop_engine(app: &App) {
-    if let Some(engine) = lock(&app.engine).take() {
-        engine.stop();
-    }
-}
-
-/// Fetches the lists that need it, on a thread of its own (a list is ~4 MB).
-fn refresh_lists_soon(app: &Arc<App>) {
-    let app = Arc::clone(app);
-    std::thread::spawn(move || {
-        let settings = lock(&app.settings).engine.clone();
-        let engine = lock(&app.engine);
-        if let Some(engine) = engine.as_ref() {
-            let _ = engine.refresh_lists(&settings, false);
-        }
-    });
-}
-
-/// Turns protection on or off, as the switch and the tray do.
-fn set_on(app: &App, on: bool) -> Result<(), String> {
-    let mode = lock(&app.settings).mode;
-    *lock(&app.problem) = None;
-    let result = if on {
-        match mode {
-            Mode::Local => start_engine(app).and_then(|()| {
-                if system_allowed() {
-                    elevated(&app.data, &["apply"]).inspect_err(|_| stop_engine(app))
-                } else {
-                    Ok(())
-                }
-            }),
-            Mode::Native => {
-                let preset = lock(&app.settings).native_preset.clone();
-                stop_engine(app);
-                if system_allowed() {
-                    elevated(&app.data, &["native", &preset])
-                } else {
-                    Ok(())
-                }
-            }
-        }
-    } else {
-        let restored = if system_allowed() && system::in_charge(&app.data).is_some() {
-            elevated(&app.data, &["restore"])
-        } else {
-            Ok(())
-        };
-        if restored.is_ok() {
-            stop_engine(app);
-        }
-        restored
-    };
-    match result {
-        Ok(()) => {
-            let mut s = lock(&app.settings);
-            s.on = on;
-            s.save(&app.data);
-            Ok(())
-        }
-        Err(e) => {
-            *lock(&app.problem) = Some(e.clone());
-            Err(e)
-        }
-    }
 }
 
 // ---- commands --------------------------------------------------------------------
@@ -283,41 +189,30 @@ fn strings(state: State<'_>, language: String) -> Value {
     serde_json::from_str(if lang == "tr" { TR } else { EN }).unwrap_or(Value::Null)
 }
 
-#[tauri::command]
+/// The settings, presets, lists and state; with no service yet, a default
+/// view that says the service is still to be set up.
+#[tauri::command(async)]
 fn boot(state: State<'_>) -> Value {
-    let settings = lock(&state.settings).clone();
-    let presets: Vec<Value> = PRESETS
-        .iter()
-        .map(|p| json!({"id": p.id, "name": p.name, "transports": p.transports, "ips": p.ips}))
-        .collect();
-    let lists: Vec<Value> = List::ALL
-        .iter()
-        .map(|l| {
-            json!({
-                "id": l,
-                "updated": eon_dns_engine::lists::updated(&state.data, *l)
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs()),
-                "size": eon_dns_engine::lists::load(&state.data, *l).map(|s| s.len()),
-            })
-        })
-        .collect();
-    json!({
-        "settings": settings,
-        "presets": presets,
-        "lists": lists,
-        "state": state_view(&state),
-        "version": env!("CARGO_PKG_VERSION"),
-    })
+    if let Ok(mut v) = state.ask(Request::Boot) {
+        let outdated = uses_service() && v["version"].as_str() != Some(env!("CARGO_PKG_VERSION"));
+        v["state"]["service_needed"] = json!(outdated);
+        v
+    } else {
+        // Nothing answers yet: show what a fresh install would, from a
+        // throwaway core that touches nothing.
+        let temp = std::env::temp_dir().join("eon-dns-preview");
+        let core = Arc::new(Core::new(temp, false, 0));
+        let mut v = core.handle(Request::Boot).unwrap_or(Value::Null);
+        v["state"]["service_needed"] = json!(true);
+        v
+    }
 }
 
 #[tauri::command(async)]
 fn turn(app: tauri::AppHandle, state: State<'_>, on: bool) -> Value {
-    if set_on(&state, on).is_ok() && on {
-        refresh_lists_soon(&state);
-    }
+    let result = state.ask_or_install(Request::Turn { on });
     refresh_tray(&app);
-    state_view(&state)
+    result.unwrap_or_else(|e| json!({"on": !on, "problem": e}))
 }
 
 #[tauri::command(async)]
@@ -326,104 +221,66 @@ fn save_settings(
     state: State<'_>,
     settings: Value,
 ) -> Result<Value, String> {
-    let next: AppSettings = serde_json::from_value(settings).map_err(|e| e.to_string())?;
-    let before = lock(&state.settings).clone();
-    {
-        let mut s = lock(&state.settings);
-        let on = s.on;
-        *s = next.clone();
-        s.on = on;
-        s.save(&state.data);
-    }
-    if let Some(engine) = lock(&state.engine).as_ref() {
-        engine.update(&next.engine)?;
-    }
-    if next.language != before.language {
-        let lang = if next.language.starts_with("tr") {
-            "tr"
-        } else {
-            "en"
-        };
+    if let Some(l) = settings["language"].as_str() {
+        let lang = if l.starts_with("tr") { "tr" } else { "en" };
         lang.clone_into(&mut lock(&state.lang));
-        let _ = tray(&app);
     }
-    // A change of mode, or of the Windows preset, while on: re-apply.
-    let mode_changed = next.mode != before.mode
-        || (next.mode == Mode::Native && next.native_preset != before.native_preset);
-    if before.on && mode_changed {
-        let _ = set_on(&state, true);
-    }
-    // Lists switched on for the first time are fetched at once.
-    let fresh: Vec<List> = next
-        .engine
-        .lists
-        .iter()
-        .filter(|l| !before.engine.lists.contains(l))
-        .copied()
-        .collect();
-    if !fresh.is_empty() {
-        refresh_lists_soon(&state);
-    }
-    Ok(state_view(&state))
+    let r = state.ask_or_install(Request::SaveSettings { settings });
+    refresh_tray(&app);
+    r
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stats(state: State<'_>) -> Value {
-    let engine = lock(&state.engine);
-    match engine.as_ref() {
-        Some(e) => json!({"stats": e.stats(), "log": e.log(), "lists": e.list_sizes()}),
-        None => json!({"stats": null, "log": [], "lists": []}),
-    }
+    state
+        .ask(Request::Stats)
+        .unwrap_or_else(|_| json!({"stats": null, "log": [], "lists": []}))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_log(state: State<'_>) {
-    if let Some(e) = lock(&state.engine).as_ref() {
-        e.clear_log();
-    }
+    let _ = state.ask(Request::ClearLog);
 }
 
 #[tauri::command(async)]
 fn refresh_lists(state: State<'_>) -> Value {
-    let settings = lock(&state.settings).engine.clone();
-    let engine = lock(&state.engine);
-    let results: Vec<Value> = match engine.as_ref() {
-        Some(e) => e
-            .refresh_lists(&settings, true)
-            .into_iter()
-            .map(|(l, r)| match r {
-                Ok(n) => json!({"id": l, "ok": n}),
-                Err(e) => json!({"id": l, "error": e}),
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    json!(results)
+    state.ask(Request::RefreshLists).unwrap_or(Value::Null)
 }
 
 #[tauri::command(async)]
-fn benchmark(transport: Transport) -> Value {
-    // A runtime of its own: the timing must not share threads with anything.
-    let candidates: Vec<Upstream> = PRESETS
-        .iter()
-        .map(|p| Upstream::Preset { id: p.id.into() })
-        .collect();
-    // On a thread of its own: this command already runs inside an async runtime.
-    let scores = std::thread::spawn(move || {
-        tokio::runtime::Runtime::new()
-            .map(|rt| rt.block_on(eon_dns_engine::bench::run(candidates, transport)))
-            .unwrap_or_default()
-    })
-    .join()
-    .unwrap_or_default();
-    json!(scores)
+fn benchmark(state: State<'_>, transport: Transport) -> Value {
+    match &state.backend {
+        // The window can time resolvers itself; it needs no rights for that.
+        Backend::Service(_) => {
+            let core = Arc::new(Core::new(
+                std::env::temp_dir().join("eon-dns-preview"),
+                false,
+                0,
+            ));
+            core.handle(Request::Benchmark { transport })
+                .unwrap_or(Value::Null)
+        }
+        Backend::Here(core) => core
+            .handle(Request::Benchmark { transport })
+            .unwrap_or(Value::Null),
+    }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn explain(state: State<'_>, name: String) -> Value {
-    lock(&state.engine)
-        .as_ref()
-        .map_or(Value::Null, |e| json!(e.explain(&name)))
+    state.ask(Request::Explain { name }).unwrap_or(Value::Null)
+}
+
+#[tauri::command(async)]
+fn warp_reset(state: State<'_>) -> Value {
+    state.ask(Request::WarpReset).unwrap_or(Value::Null)
+}
+
+#[tauri::command(async)]
+fn diagnostics(state: State<'_>) -> Value {
+    state
+        .ask(Request::Diagnostics)
+        .unwrap_or_else(|e| json!(format!("no service: {e}")))
 }
 
 // ---- the window and the tray ------------------------------------------------------
@@ -436,13 +293,21 @@ fn show(app: &tauri::AppHandle) {
     }
 }
 
+fn settings_flag(app: &tauri::AppHandle, key: &str, default: bool) -> bool {
+    app.state::<Arc<App>>()
+        .ask(Request::Boot)
+        .ok()
+        .and_then(|b| b["settings"][key].as_bool())
+        .unwrap_or(default)
+}
+
 fn main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     #[allow(unused_mut)]
     let mut builder =
         tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
             .title("EON DNS")
-            .inner_size(1040.0, 700.0)
-            .min_inner_size(760.0, 560.0)
+            .inner_size(1040.0, 720.0)
+            .min_inner_size(760.0, 580.0)
             .decorations(false)
             .shadow(true);
     #[cfg(debug_assertions)]
@@ -455,44 +320,31 @@ fn main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     let handle = app.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            let state = handle.state::<Arc<App>>();
-            if lock(&state.settings).close_to_tray {
+            if settings_flag(&handle, "close_to_tray", true) {
                 api.prevent_close();
                 if let Some(w) = handle.get_webview_window("main") {
                     let _ = w.hide();
                 }
-            } else if !quit(&handle) {
-                api.prevent_close();
+            } else {
+                quit(&handle);
             }
         }
     });
     Ok(())
 }
 
-/// Leaves, putting the system's DNS back first when the local resolver is
-/// what it points at. Answers false if that could not be done (the person
-/// declined the prompt): quitting then would leave the computer without DNS.
-fn quit(app: &tauri::AppHandle) -> bool {
-    let state = app.state::<Arc<App>>();
-    let local_in_charge = system::in_charge(&state.data).is_some_and(|p| p.mode == "local");
-    if local_in_charge && system_allowed() && elevated(&state.data, &["restore"]).is_err() {
-        *lock(&state.problem) = Some("problem.quit".into());
-        show(app);
-        let _ = app.emit("state", state_view(&state));
-        return false;
+/// Leaves. With the service, protection stays as it is: the service keeps
+/// it, as WARP keeps connecting with its window closed. Without it, the
+/// window's own resolver stops with it.
+fn quit(app: &tauri::AppHandle) {
+    if let Backend::Here(core) = &app.state::<Arc<App>>().backend {
+        let _ = core.set_on(false);
     }
-    if local_in_charge {
-        let mut s = lock(&state.settings);
-        s.on = false;
-        s.save(&state.data);
-    }
-    stop_engine(&state);
     app.exit(0);
-    true
 }
 
 fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let on = app.state::<Arc<App>>().settings.lock().is_ok_and(|s| s.on);
+    let on = settings_flag(app, "on", false);
     let show_item = MenuItem::with_id(app, "show", text(app, "tray.show"), true, None::<&str>)?;
     let toggle = MenuItem::with_id(
         app,
@@ -528,19 +380,15 @@ fn tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "toggle" => {
                 let app = app.clone();
                 std::thread::spawn(move || {
+                    let on = settings_flag(&app, "on", false);
                     let state = app.state::<Arc<App>>();
-                    let on = lock(&state.settings).on;
-                    let _ = set_on(&state, !on);
+                    if let Ok(v) = state.ask_or_install(Request::Turn { on: !on }) {
+                        let _ = app.emit("state", v);
+                    }
                     refresh_tray(&app);
-                    let _ = app.emit("state", state_view(&state));
                 });
             }
-            "quit" => {
-                let app = app.clone();
-                std::thread::spawn(move || {
-                    quit(&app);
-                });
-            }
+            "quit" => quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -561,88 +409,55 @@ fn refresh_tray(app: &tauri::AppHandle) {
     let _ = tray(app);
 }
 
-/// Counters to the window once a second, and to the tray's tooltip.
+/// Counters and state to the window once a second, and to the tray's tooltip.
 fn ticker(app: tauri::AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(1));
         let state = app.state::<Arc<App>>();
-        let view = lock(&state.engine).as_ref().map(Engine::stats);
-        let on = lock(&state.settings).on;
+        let Ok(v) = state.ask(Request::Stats) else {
+            continue;
+        };
+        let on = v["state"]["on"].as_bool().unwrap_or(false);
         if let Some(tray) = app.tray_by_id("main") {
-            let tip = match (&view, on) {
-                (Some(v), true) => format!(
+            let tip = if !on {
+                format!("EON DNS\n{}", text(&app, "tray.offline"))
+            } else if !v["state"]["tunnel"].is_null() {
+                format!("EON DNS\n{}", text(&app, "tray.tunnel"))
+            } else if v["stats"].is_null() {
+                format!("EON DNS\n{}", text(&app, "tray.native"))
+            } else {
+                format!(
                     "EON DNS\n{} {} · {} {}",
-                    v.lookups,
+                    v["stats"]["lookups"],
                     text(&app, "tray.lookups"),
-                    v.blocked,
+                    v["stats"]["blocked"],
                     text(&app, "tray.blocked")
-                ),
-                (_, true) => format!("EON DNS\n{}", text(&app, "tray.native")),
-                _ => format!("EON DNS\n{}", text(&app, "tray.offline")),
+                )
             };
             let _ = tray.set_tooltip(Some(tip));
         }
-        if let Some(v) = view {
-            let _ = app.emit("stats", v);
-        }
+        let _ = app.emit("tick", v);
     });
-}
-
-/// Keeps the lists fresh: at start, then every six hours (each list is
-/// fetched only when a day old).
-fn list_keeper(app: tauri::AppHandle) {
-    std::thread::spawn(move || loop {
-        {
-            let state = app.state::<Arc<App>>();
-            let settings = lock(&state.settings).engine.clone();
-            let engine = lock(&state.engine);
-            if let Some(engine) = engine.as_ref() {
-                let _ = engine.refresh_lists(&settings, false);
-            }
-        }
-        std::thread::sleep(Duration::from_hours(6));
-    });
-}
-
-/// At start: if the record says EON DNS is in charge, carry on (the switch
-/// was on) or put things back (it should not be). Never leaves the computer
-/// pointing at a resolver that is not running (madde 47d).
-fn recover(app: &App) {
-    let Some(previous) = system::in_charge(&app.data) else {
-        return;
-    };
-    let wanted = lock(&app.settings).on;
-    if previous.mode == "local" {
-        if wanted && start_engine(app).is_ok() {
-            return;
-        }
-        if system_allowed() && elevated(&app.data, &["restore"]).is_err() {
-            *lock(&app.problem) = Some("problem.repair".into());
-        } else {
-            let mut s = lock(&app.settings);
-            s.on = false;
-            s.save(&app.data);
-        }
-    }
 }
 
 fn window() {
-    let data = data_dir();
-    let settings = AppSettings::load(&data);
-    let lang = if settings.language.starts_with("tr") {
-        "tr"
+    let backend = if uses_service() {
+        Backend::Service(core::machine_data())
     } else {
-        "en"
-    }
-    .to_owned();
+        let core = Arc::new(Core::new(user_data(), false, port()));
+        Backend::Here(core)
+    };
     let app_state = Arc::new(App {
-        data: data.clone(),
-        settings: Mutex::new(settings),
-        engine: Mutex::new(None),
-        problem: Mutex::new(None),
-        lang: Mutex::new(lang),
+        backend,
+        lang: Mutex::new("en".into()),
     });
-    recover(&app_state);
+    if let Ok(b) = app_state.ask(Request::Boot) {
+        let l = b["settings"]["language"].as_str().unwrap_or("");
+        *lock(&app_state.lang) = if l.starts_with("tr") { "tr" } else { "en" }.into();
+    }
+    if let Backend::Here(core) = &app_state.backend {
+        core.recover();
+    }
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show(app);
@@ -652,8 +467,7 @@ fn window() {
             let handle = app.handle().clone();
             main_window(&handle)?;
             tray(&handle)?;
-            ticker(handle.clone());
-            list_keeper(handle);
+            ticker(handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -666,6 +480,8 @@ fn window() {
             refresh_lists,
             benchmark,
             explain,
+            warp_reset,
+            diagnostics,
         ])
         .build(tauri::generate_context!());
     match built {
@@ -677,13 +493,14 @@ fn window() {
     }
 }
 
-/// `--system apply|native <preset>|restore --data <dir>`: the elevated step.
+/// `--system apply|native <preset>|restore --data <dir>`: kept for checks
+/// that exercise the system step on its own (CI's Windows runner).
 fn system_command(args: &[String]) -> i32 {
     let data = args
         .iter()
         .position(|a| a == "--data")
         .and_then(|i| args.get(i + 1))
-        .map_or_else(data_dir, PathBuf::from);
+        .map_or_else(core::machine_data, PathBuf::from);
     let result = match args.get(2).map(String::as_str) {
         Some("apply") => system::apply_local(&data),
         Some("native") => match args
@@ -701,7 +518,18 @@ fn system_command(args: &[String]) -> i32 {
         Err(e) => {
             let _ = std::fs::create_dir_all(&data);
             let _ = std::fs::write(data.join("system-error.txt"), &e);
+            eprintln!("{e}");
             1
+        }
+    }
+}
+
+fn exit_with(result: Result<(), String>) -> ! {
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
     }
 }
@@ -711,6 +539,37 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("--version" | "-V") => println!("EON DNS {}", env!("CARGO_PKG_VERSION")),
         Some("--system") => std::process::exit(system_command(&args)),
+        // Like `warp-cli status`: what the service is doing, as text.
+        Some("--status") => {
+            match control::ask(
+                &core::machine_data(),
+                &Request::Diagnostics,
+                Duration::from_secs(10),
+            ) {
+                Some(Ok(v)) => println!("{}", v.as_str().unwrap_or_default()),
+                Some(Err(e)) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                None => {
+                    eprintln!("the EON DNS service is not answering");
+                    std::process::exit(1);
+                }
+            }
+        }
+        #[cfg(windows)]
+        Some("--service") => exit_with(service::run()),
+        #[cfg(windows)]
+        Some("--install-service") => exit_with(service::install()),
+        #[cfg(windows)]
+        Some("--uninstall-service") => exit_with(service::uninstall()),
+        // The core in the foreground with the system's rights (CI, diagnosis):
+        // connects as the settings say and serves the window until killed.
+        Some("--foreground") => {
+            let core = Arc::new(Core::new(core::machine_data(), true, port()));
+            core.recover();
+            exit_with(control::serve(core));
+        }
         Some("--selftest") => {
             let report = selftest::run();
             match args.get(2) {

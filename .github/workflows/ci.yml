@@ -62,6 +62,43 @@ jobs:
           Write-Output "after:  $after"
           if (($before -join ';') -ne ($after -join ';')) { Write-Output '::error::restore did not put the adapters back as they were'; exit 1 }
           if (Test-Path (Join-Path $d 'system-previous.json')) { Write-Output '::error::the record outlived the restore'; exit 1 }
+      # The service and a real tunnel through Cloudflare's WARP network, where
+      # changing the system is harmless. Cloudflare's own trace page says
+      # warp=on only for traffic that came through WARP.
+      - name: The service and a real WARP tunnel (runner only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:ProgramData 'EON\DNS'
+          New-Item -ItemType Directory -Force $data | Out-Null
+          $settings = '{"mode":"warp","on":true,"auto_connect":true,"version":2,"engine":{"upstreams":[{"kind":"preset","id":"cloudflare"}],"transport":"https","validate":false,"lists":[],"allow":[],"block":[],"log":false,"cache":4096,"race":2}}'
+          Set-Content -Path (Join-Path $data 'settings.json') -Value $settings -Encoding utf8NoBOM
+          function Snapshot { Get-NetAdapter | Where-Object Status -eq 'Up' | Where-Object Name -ne 'EON DNS' | ForEach-Object { "{0}={1}" -f $_.ifIndex, ((Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ',') } }
+          $before = Snapshot
+          Write-Output "trace before: $((curl.exe -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace) -match 'warp=')"
+          & target\debug\eon-dns.exe --install-service
+          if ($LASTEXITCODE -ne 0) { Write-Output '::error::the service did not install'; exit 1 }
+          $trace = ''
+          for ($k = 0; $k -lt 45; $k++) {
+            $trace = (curl.exe -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace) -join "`n"
+            if ($trace -match 'warp=on') { break }
+            Start-Sleep -Seconds 2
+          }
+          & target\debug\eon-dns.exe --status
+          Write-Output "trace during: $($trace -split "`n" | Where-Object { $_ -match '^(warp|loc|colo)=' })"
+          Get-NetAdapter -Name 'EON DNS' -ErrorAction SilentlyContinue | Format-Table Name, Status, ifIndex | Out-String
+          if ($trace -notmatch 'warp=on') { Write-Output '::error::traffic did not go through WARP'; & target\debug\eon-dns.exe --uninstall-service; exit 1 }
+          $r = Resolve-DnsName www.roblox.com -Server 127.0.0.1 -Type A -DnsOnly -ErrorAction SilentlyContinue | Where-Object IPAddress | Select-Object -First 1
+          Write-Output "roblox through the resolver: $($r.IPAddress)"
+          Write-Output "roblox over https: $(curl.exe -s -o NUL --max-time 15 -w '%{http_code}' https://www.roblox.com/)"
+          & target\debug\eon-dns.exe --uninstall-service
+          Start-Sleep -Seconds 3
+          $after = Snapshot
+          Write-Output "before: $before"; Write-Output "after:  $after"
+          if (($before -join ';') -ne ($after -join ';')) { Write-Output '::error::stopping the service did not put the adapters back'; exit 1 }
+          if (Get-NetAdapter -Name 'EON DNS' -ErrorAction SilentlyContinue) { Write-Output '::error::the tunnel adapter outlived the service'; exit 1 }
+          $off = (curl.exe -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace) -join "`n"
+          if ($off -match 'warp=on') { Write-Output '::error::traffic still went through WARP after the service stopped'; exit 1 }
       - uses: actions/setup-node@v4
         if: runner.os == 'Windows'
         with:

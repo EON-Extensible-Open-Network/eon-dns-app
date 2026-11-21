@@ -18,7 +18,9 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/EON-Extensible-Open-Network/eon-dns-app"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Denied everywhere; allowed in exactly one function, which loads the signed
+# WireGuard driver (engine/src/tunnel/windows.rs), with the reason written there.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

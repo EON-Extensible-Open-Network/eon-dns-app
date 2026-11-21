@@ -185,7 +185,7 @@ pub fn run() -> String {
     }
     let _ = std::fs::remove_dir_all(&data);
     line(
-        eon_dns_engine::system::in_charge(&crate::data_dir()).is_none()
+        eon_dns_engine::system::in_charge(&crate::core::machine_data()).is_none()
             || std::env::var_os("EON_DNS_DATA").is_none(),
         "the system's DNS was not touched by this run",
     );

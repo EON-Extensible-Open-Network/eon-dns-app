@@ -102,12 +102,38 @@ function routeSentence() {
     route.append(t("route.native.before"), el("strong", { text: presetName(settings.native_preset) }), t("route.native.after"));
     return;
   }
+  if (TUNNEL_MODES.includes(settings.mode)) {
+    const where = settings.mode === "warp" ? "Cloudflare WARP" : settings.mode === "eon" ? t("connect.eon") : t("route.yours");
+    route.append(t("route.tunnel.before"), el("strong", { text: where }), t("route.tunnel.after"));
+    return;
+  }
   const names = settings.engine.upstreams.map((u) => (u.kind === "preset" ? presetName(u.id) : u.kind === "plain" ? u.addr : u.server_name));
   route.append(
     t("route.local.before", { how: t(`transport.short.${settings.engine.transport}`) }),
     el("strong", { text: joinNames(names) }),
     settings.engine.validate ? t("route.local.dnssec") : t("route.local.after"),
   );
+}
+
+const TUNNEL_MODES = ["warp", "wireguard", "eon"];
+
+function size(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = bytes || 0;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${new Intl.NumberFormat(lang, { maximumFractionDigits: i === 0 ? 0 : 1 }).format(v)} ${units[i]}`;
+}
+
+/** The connection chooser under the switch: changing it while on reconnects. */
+function drawConnect() {
+  const mode = settings.mode === "native" ? null : settings.mode;
+  for (const b of document.querySelectorAll(".connect button")) {
+    b.setAttribute("aria-checked", String(b.dataset.mode === mode));
+    b.disabled = busy;
+  }
+  const hint = settings.mode === "native" ? t("connect.hint.native") : t(`connect.hint.${settings.mode}`);
+  $("connect-hint").textContent = state.service_needed && !state.on ? `${hint} ${t("setup.once")}` : hint;
 }
 
 function drawOverview() {
@@ -122,7 +148,14 @@ function drawOverview() {
   const problem = state.problem;
   $("problem").hidden = !problem;
   $("problem").textContent = problem ? (problem.startsWith("problem.") ? t(problem) : t("problem.other", { detail: problem })) : "";
-  const local = settings.mode === "local";
+  const tunnel = TUNNEL_MODES.includes(settings.mode);
+  document.body.classList.toggle("tunnel", tunnel);
+  const local = settings.mode !== "native";
+  const t_ = state.tunnel?.stats;
+  $("fig-down").textContent = t_ ? size(t_.rx_bytes) : "–";
+  $("fig-up").textContent = t_ ? size(t_.tx_bytes) : "–";
+  for (const f of document.querySelectorAll(".tunnel-fig")) f.hidden = !tunnel;
+  drawConnect();
   $("fig-lookups").textContent = stats ? num(stats.lookups) : "–";
   $("fig-blocked").textContent = stats ? num(stats.blocked) : "–";
   $("fig-speed").textContent = stats?.median_ms != null ? t("fig.ms", { ms: num(Math.round(stats.median_ms)) }) : "–";
@@ -275,12 +308,17 @@ function drawLog() {
       ]);
     }),
   );
-  $("log-empty").textContent = settings.mode !== "local" ? t("recent.native") : !settings.engine.log ? t("log.off") : rows.length ? "" : t("log.none");
+  $("log-empty").textContent = settings.mode === "native" ? t("recent.native") : !settings.engine.log ? t("log.off") : rows.length ? "" : t("log.none");
 }
 
 // ---- settings ------------------------------------------------------------------------
 
 function drawSettings(version) {
+  $("auto-connect").checked = settings.auto_connect;
+  $("exclude").value = (settings.exclude || []).join("\n");
+  $("wg-conf").value = settings.wireguard || "";
+  $("eon-server").value = settings.eon_server || "";
+  $("warp-license").value = settings.warp_license || "";
   $("language").value = lang;
   $("close-to-tray").checked = settings.close_to_tray;
   $("cache").value = String(settings.engine.cache);
@@ -311,6 +349,12 @@ async function pull() {
   const r = await invoke("stats");
   stats = r.stats;
   log = r.log || [];
+  if (r.state) state = r.state;
+  // Lists arrive in the background; their sizes come with the counters.
+  for (const [id, n] of r.lists || []) {
+    const l = lists.find((x) => x.id === id);
+    if (l && l.size !== n) { l.size = n; if (!$("view-protection").hidden) drawProtection(); }
+  }
   drawOverview();
   if (!$("view-log").hidden) drawLog();
 }
@@ -390,7 +434,31 @@ async function start() {
   $("win-min").addEventListener("click", () => appWindow.minimize());
   $("win-max").addEventListener("click", () => appWindow.toggleMaximize());
   $("win-close").addEventListener("click", () => appWindow.close());
-  await listen("stats", (e) => { stats = e.payload; drawOverview(); });
+  await listen("tick", (e) => { stats = e.payload.stats; if (e.payload.state) state = e.payload.state; drawOverview(); });
+  for (const b of document.querySelectorAll(".connect button")) {
+    b.addEventListener("click", async () => {
+      if (busy || settings.mode === b.dataset.mode) return;
+      settings.mode = b.dataset.mode;
+      busy = true;
+      drawOverview();
+      try { await save(); } finally { busy = false; await pull(); }
+    });
+  }
+  $("auto-connect").addEventListener("change", () => { settings.auto_connect = $("auto-connect").checked; save(); });
+  $("tunnel-save").addEventListener("click", async () => {
+    settings.exclude = $("exclude").value.split(/\s+/).map((x) => x.trim()).filter(Boolean);
+    settings.wireguard = $("wg-conf").value;
+    settings.eon_server = $("eon-server").value.trim();
+    settings.warp_license = $("warp-license").value.trim();
+    await save();
+    $("diag-done").textContent = t("tunnel.saved");
+  });
+  $("warp-reset").addEventListener("click", async () => { state = await invoke("warp_reset"); drawOverview(); });
+  $("diag-copy").addEventListener("click", async () => {
+    const text = await invoke("diagnostics");
+    try { await navigator.clipboard.writeText(String(text)); $("diag-done").textContent = t("diag.copied"); }
+    catch { $("diag-done").textContent = String(text); }
+  });
   await listen("state", (e) => { state = e.payload; drawOverview(); });
   setInterval(pull, 2000);
 }

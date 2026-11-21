@@ -117,7 +117,10 @@ try {
 
   await js(`document.getElementById('switch').click()`);
   const turnedOn = await until(`document.body.classList.contains('on') && document.getElementById('switch-state').textContent === t('switch.on')`, 20000);
-  if (!turnedOn) console.log("    state:", await js(`JSON.stringify(state)`));
+  if (!turnedOn) {
+    console.log("    state:", await js(`JSON.stringify(state)`));
+    console.log("    turn:", await js(`invoke("turn", { on: true }).then((r) => JSON.stringify(r)).catch((e) => "ERR " + e)`));
+  }
   check("pressing it turns protection on", turnedOn);
   check("and says where lookups go", await js(`document.getElementById('route').textContent.includes('Cloudflare') && document.getElementById('route').textContent.includes('Quad9')`));
   const ip = await lookup("wikipedia.org");
@@ -156,6 +159,20 @@ try {
   await js(`document.getElementById('bench-run').click()`);
   check("timing the resolvers from here ranks them", await until(`document.querySelectorAll('#bench-results li .bar').length === 7`, 90000));
   await shot("05-resolvers");
+
+  // How to connect: the chooser sits right under the switch. Here the window
+  // runs without the service, so a tunnel is refused with a reason, and
+  // going back to "DNS only" reconnects at once.
+  await js(`document.querySelector('[data-view=overview]').click()`);
+  check("the connection chooser sits under the switch, DNS only chosen", await js(`(() => { const sw = document.getElementById('switch').getBoundingClientRect(); const c = document.querySelector('.connect').getBoundingClientRect(); return c.top > sw.bottom && c.top - sw.bottom < 160 && document.querySelector('.connect [data-mode=dns]').getAttribute('aria-checked') === 'true'; })()`));
+  await js(`document.querySelector('.connect [data-mode=warp]').click()`);
+  check("choosing WARP without the service says why, and shows off rather than protected", await until(`document.getElementById('problem').textContent === t('problem.tunnelservice') && !document.body.classList.contains('on') && !busy`, 20000));
+  await shot("07-warp-without-service");
+  await js(`document.querySelector('.connect [data-mode=dns]').click()`);
+  await until(`!busy && document.querySelector('.connect [data-mode=dns]').getAttribute('aria-checked') === 'true'`);
+  await js(`document.getElementById('switch').click()`);
+  check("and DNS only connects again", await until(`document.body.classList.contains('on') && document.getElementById('problem').hidden && document.querySelector('.connect [data-mode=dns]').getAttribute('aria-checked') === 'true'`, 20000));
+  check(`the resolver answers again (${await lookup("example.org")})`, (await lookup("wikipedia.org")) !== null);
 
   await js(`(async () => { document.getElementById('language').value = 'tr'; document.getElementById('language').dispatchEvent(new Event('change')); })()`);
   await js(`document.querySelector('[data-view=overview]').click()`);

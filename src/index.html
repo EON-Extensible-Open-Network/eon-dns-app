@@ -33,12 +33,21 @@ SPDX-FileCopyrightText: 2026 EON contributors
   <main>
     <!-- Overview: the switch is the screen. -->
     <section id="view-overview" class="view overview">
-      <div class="dial-wrap">
-        <svg id="ring" class="ring" viewBox="0 0 400 400" aria-hidden="true"></svg>
-        <button type="button" id="switch" class="switch" role="switch" aria-checked="false">
-          <span id="switch-state" class="switch-state">Off</span>
-          <span id="switch-hint" class="switch-hint"></span>
-        </button>
+      <div class="left">
+        <div class="dial-wrap">
+          <svg id="ring" class="ring" viewBox="0 0 400 400" aria-hidden="true"></svg>
+          <button type="button" id="switch" class="switch" role="switch" aria-checked="false">
+            <span id="switch-state" class="switch-state">Off</span>
+            <span id="switch-hint" class="switch-hint"></span>
+          </button>
+        </div>
+        <div class="connect" role="radiogroup" data-i18n-label="connect.label" aria-label="How to connect">
+          <button type="button" role="radio" data-mode="dns"><span data-i18n="connect.dns">DNS only</span></button>
+          <button type="button" role="radio" data-mode="warp"><span data-i18n="connect.warp">WARP</span></button>
+          <button type="button" role="radio" data-mode="wireguard"><span data-i18n="connect.wireguard">My tunnel</span></button>
+          <button type="button" role="radio" data-mode="eon"><span data-i18n="connect.eon">EON server</span></button>
+        </div>
+        <p id="connect-hint" class="connect-hint"></p>
       </div>
       <div class="readout">
         <p id="route" class="route"></p>
@@ -47,6 +56,8 @@ SPDX-FileCopyrightText: 2026 EON contributors
           <div><dt data-i18n="fig.lookups">Lookups</dt><dd id="fig-lookups">0</dd></div>
           <div><dt data-i18n="fig.blocked">Blocked</dt><dd id="fig-blocked" class="warm">0</dd></div>
           <div><dt data-i18n="fig.speed">Typical answer</dt><dd id="fig-speed">–</dd></div>
+          <div class="tunnel-fig"><dt data-i18n="fig.down">Downloaded</dt><dd id="fig-down">–</dd></div>
+          <div class="tunnel-fig"><dt data-i18n="fig.up">Uploaded</dt><dd id="fig-up">–</dd></div>
         </dl>
         <p id="ring-caption" class="caption" data-i18n="ring.caption">The ring is the last hour, one tick a minute; amber is what was blocked.</p>
         <div class="recent">
@@ -89,7 +100,7 @@ SPDX-FileCopyrightText: 2026 EON contributors
       <p class="lede" data-i18n="resolvers.lede">Choose who answers. Several are asked at once and the first good answer wins. EON runs no resolver of its own.</p>
       <fieldset class="mode">
         <legend data-i18n="mode.title">How the computer uses EON DNS</legend>
-        <label class="mode-option"><input type="radio" name="mode" value="local"><span><strong data-i18n="mode.local">EON's resolver on this computer</strong><span class="note" data-i18n="mode.localhint">Encrypts, blocks, counts and checks signatures here. EON DNS stays running in the tray.</span></span></label>
+        <label class="mode-option"><input type="radio" name="mode" value="dns"><span><strong data-i18n="mode.local">EON's resolver on this computer</strong><span class="note" data-i18n="mode.localhint">Encrypts, blocks, counts and checks signatures here. EON DNS stays running in the tray.</span></span></label>
         <label class="mode-option"><input type="radio" name="mode" value="native"><span><strong data-i18n="mode.native">Windows' own encrypted DNS</strong><span class="note" data-i18n="mode.nativehint">Windows encrypts lookups to one resolver and keeps doing so with EON DNS closed. No blocking or counters.</span></span></label>
       </fieldset>
       <div id="presets" class="rows"></div>
@@ -139,6 +150,30 @@ SPDX-FileCopyrightText: 2026 EON contributors
         <label class="row setting"><span data-i18n="settings.language">Language</span><select id="language"><option value="en">English</option><option value="tr">Türkçe</option></select></label>
         <label class="row setting"><span data-i18n="settings.tray">Keep running in the tray when the window closes</span><input type="checkbox" id="close-to-tray"></label>
         <label class="row setting"><span data-i18n="settings.cache">Answers kept in the cache</span><select id="cache"><option value="1024">1 000</option><option value="4096">4 000</option><option value="16384">16 000</option></select></label>
+      </div>
+      <h2 class="section" data-i18n="tunnel.title">Tunnel</h2>
+      <div class="rows">
+        <label class="row setting"><span data-i18n="settings.auto">Connect again when the computer starts</span><input type="checkbox" id="auto-connect"></label>
+      </div>
+      <div class="tunnel-box">
+        <label class="field" for="exclude"><span data-i18n="tunnel.exclude">Keep these off the tunnel</span>
+          <textarea id="exclude" rows="3" spellcheck="false" placeholder="192.168.1.0/24"></textarea></label>
+        <p class="note" data-i18n="tunnel.excludehint">One address or range per line. Your home network is never tunnelled.</p>
+        <label class="field" for="wg-conf"><span data-i18n="tunnel.wireguard">My tunnel: a WireGuard configuration</span>
+          <textarea id="wg-conf" rows="6" spellcheck="false" placeholder="[Interface]&#10;PrivateKey = …&#10;Address = …&#10;&#10;[Peer]&#10;PublicKey = …&#10;Endpoint = …"></textarea></label>
+        <p class="note" data-i18n="tunnel.wireguardhint">Paste the file your own server or VPN provider gives you.</p>
+        <label class="field" for="eon-server"><span data-i18n="tunnel.eon">EON server address</span><input id="eon-server" spellcheck="false" placeholder="https://…"></label>
+        <p class="note" data-i18n="tunnel.eonhint">EON runs no tunnel server yet. When one exists, its address goes here.</p>
+        <label class="field" for="warp-license"><span data-i18n="tunnel.license">WARP+ key (optional)</span><input id="warp-license" spellcheck="false" placeholder="xxxxxxxx-xxxxxxxx-xxxxxxxx"></label>
+        <div class="tunnel-actions">
+          <button type="button" id="tunnel-save" class="primary" data-i18n="tunnel.save">Save tunnel settings</button>
+          <button type="button" id="warp-reset" class="ghost" data-i18n="tunnel.warpreset">New WARP identity</button>
+        </div>
+      </div>
+      <h2 class="section" data-i18n="diag.title">Diagnostics</h2>
+      <div class="tunnel-actions">
+        <button type="button" id="diag-copy" class="ghost" data-i18n="diag.copy">Copy a report</button>
+        <span id="diag-done" class="note" role="status"></span>
       </div>
       <div class="about">
         <h2 data-i18n="about.title">About</h2>

@@ -50,12 +50,39 @@ fn file(data: &Path) -> PathBuf {
     data.join(FILE)
 }
 
+/// Only real addresses: the registry can hand back a value padded with NUL
+/// characters, and a loopback address is EON DNS's own setting, never what
+/// the person had before. (v0.0.1 recorded `::1` plus NULs as "before" after
+/// an earlier attempt, and then could not put anything back.)
+fn clean(list: &[String]) -> Vec<String> {
+    list.iter()
+        .flat_map(|s| s.split(|c: char| c == '\0' || c == ',' || c.is_whitespace()))
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .map(|ip| ip.to_string())
+        .collect()
+}
+
+impl Adapter {
+    #[must_use]
+    pub fn cleaned(mut self) -> Self {
+        self.static_v4 = clean(&self.static_v4);
+        self.static_v6 = clean(&self.static_v6);
+        self.name = self.name.replace('\0', "");
+        self
+    }
+}
+
 /// Whether EON DNS is in charge of the system's DNS, by its own record.
 #[must_use]
 pub fn in_charge(data: &Path) -> Option<Previous> {
     std::fs::read_to_string(file(data))
         .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
+        .and_then(|t| serde_json::from_str::<Previous>(&t).ok())
+        .map(|mut p| {
+            p.adapters = p.adapters.into_iter().map(Adapter::cleaned).collect();
+            p
+        })
 }
 
 fn powershell(script: &str) -> Result<String, String> {
@@ -105,11 +132,13 @@ ConvertTo-Json -InputObject @($list) -Depth 3 -Compress
 
 pub fn snapshot() -> Result<Vec<Adapter>, String> {
     let text = powershell(SNAPSHOT)?;
-    serde_json::from_str(text.trim()).map_err(|e| format!("adapter list: {e}"))
+    let adapters: Vec<Adapter> =
+        serde_json::from_str(text.trim()).map_err(|e| format!("adapter list: {e}"))?;
+    Ok(adapters.into_iter().map(Adapter::cleaned).collect())
 }
 
 fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    format!("'{}'", s.replace('\0', "").replace('\'', "''"))
 }
 
 /// The script that points every adapter in `adapters` at `servers`.
@@ -314,6 +343,31 @@ mod tests {
         )
         .expect("save");
         assert_eq!(in_charge(&dir).expect("record").adapters, adapters());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod repair_tests {
+    use super::*;
+
+    /// The record v0.0.1 wrote on the owner's machine: `::1` padded with NUL
+    /// characters as the "before" IPv6 server. It must restore to DHCP, and
+    /// the hand-set IPv4 servers must come back as they were.
+    #[test]
+    fn a_record_with_nul_padding_and_our_own_address_restores_cleanly() {
+        let text = r#"{"mode":"local","adapters":[{"index":19,"name":"Ethernet","static_v4":["1.1.1.1","8.8.8.8"],"static_v6":["::1\u0000\u0000\u0000\u0000"]},{"index":11,"name":"Ethernet 4","static_v4":[],"static_v6":[]}]}"#;
+        let dir = std::env::temp_dir().join(format!("eon-dns-repair-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join(FILE), text).expect("write");
+        let previous = in_charge(&dir).expect("record");
+        assert_eq!(previous.adapters[0].static_v4, ["1.1.1.1", "8.8.8.8"]);
+        assert!(previous.adapters[0].static_v6.is_empty());
+        let script = restore_script(&previous.adapters);
+        assert!(!script.contains('\0'));
+        assert!(script.contains("-InterfaceIndex 19 -ServerAddresses @('1.1.1.1','8.8.8.8')"));
+        assert!(script.contains("-InterfaceIndex 11 -ResetServerAddresses"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
