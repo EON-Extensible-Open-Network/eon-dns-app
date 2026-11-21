@@ -104,7 +104,7 @@ main { height: calc(100vh - 52px); overflow-y: auto; }
 /* ---- the overview: the dial and what it says ------------------------------------- */
 
 .overview {
-  display: grid; grid-template-columns: minmax(300px, 440px) minmax(0, 1fr);
+  display: grid; grid-template-columns: minmax(300px, 400px) minmax(0, 1fr);
   gap: clamp(1.5rem, 4vw, 3.5rem); align-items: center; min-height: 100%;
 }
 .left { display: grid; gap: 1.1rem; justify-items: center; }
@@ -112,16 +112,17 @@ main { height: calc(100vh - 52px); overflow-y: auto; }
 
 /* How to connect: four choices, one line, right under the switch. */
 .connect {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; width: min(100%, 420px);
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; width: min(100%, 460px);
   padding: 4px; border-radius: 999px; background: var(--deep); border: 1px solid var(--line);
 }
 .connect button {
-  justify-content: center; min-height: 38px; padding: 0 0.6rem; border-radius: 999px;
+  gap: 0.35rem; justify-content: center; min-height: 38px; padding: 0 0.6rem; border-radius: 999px;
   color: var(--mist); font-size: 0.86rem; font-weight: 550; white-space: nowrap;
 }
 .connect button:hover:not(:disabled) { color: var(--frost); background: var(--ridge); }
 .connect button[aria-checked="true"] { background: var(--frost); color: var(--abyss); }
 .tunnel .connect button[aria-checked="true"] { background: var(--sky); color: var(--on-sky); }
+.connect .icon { width: 14px; height: 14px; }
 .connect-hint { margin: 0; color: var(--mist); font-size: 0.84rem; text-align: center; max-width: 42ch; min-height: 2.6em; }
 .ring { position: absolute; inset: 0; width: 100%; height: 100%; }
 .ring .tick { stroke: var(--ridge); stroke-width: 5; stroke-linecap: round; transition: stroke 400ms ease; }
