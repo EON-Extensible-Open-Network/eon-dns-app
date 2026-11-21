@@ -224,6 +224,12 @@ fn save(data: &Path, previous: &Previous) -> Result<(), String> {
 fn remember(data: &Path, mode: &str) -> Result<Vec<Adapter>, String> {
     if let Some(mut previous) = in_charge(data) {
         mode.clone_into(&mut previous.mode);
+        // An adapter that came up since (Wi-Fi joining later, a cable
+        // plugged in) is added with its own settings, so it is covered too and
+        // put back too. One already recorded keeps its first record.
+        if let Ok(now) = snapshot() {
+            previous.adapters = merge_adapters(previous.adapters, now);
+        }
         save(data, &previous)?;
         return Ok(previous.adapters);
     }
@@ -236,6 +242,34 @@ fn remember(data: &Path, mode: &str) -> Result<Vec<Adapter>, String> {
         },
     )?;
     Ok(adapters)
+}
+
+/// The recorded adapters plus any in `now` that the record does not have.
+#[must_use]
+pub fn merge_adapters(mut recorded: Vec<Adapter>, now: Vec<Adapter>) -> Vec<Adapter> {
+    for a in now {
+        if !recorded.iter().any(|r| r.index == a.index) {
+            recorded.push(a);
+        }
+    }
+    recorded
+}
+
+/// Adapters that are up and do not point where EON DNS put them: the ones
+/// to cover on the next pass. Empty when everything is as it should be.
+pub fn uncovered(servers: &[&str]) -> Result<Vec<u32>, String> {
+    let list = servers
+        .iter()
+        .map(|s| quote(s))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "$want = @({list}); Get-NetAdapter | Where-Object Status -eq 'Up' | Where-Object Name -ne 'EON DNS' | ForEach-Object {{ $have = @((Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses); if (-not ($have | Where-Object {{ $want -contains $_ }})) {{ $_.ifIndex }} }}"
+    );
+    Ok(powershell(&script)?
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect())
 }
 
 /// Points the system at the local resolver. Needs administrator rights.
@@ -351,6 +385,34 @@ mod tests {
 #[allow(clippy::expect_used)]
 mod repair_tests {
     use super::*;
+
+    #[test]
+    fn an_adapter_that_came_up_later_is_added_and_the_first_record_kept() {
+        let recorded = vec![Adapter {
+            index: 19,
+            name: "Ethernet".into(),
+            static_v4: vec!["1.1.1.1".into()],
+            static_v6: vec![],
+        }];
+        let now = vec![
+            Adapter {
+                index: 19,
+                name: "Ethernet".into(),
+                static_v4: vec!["127.0.0.1".into()],
+                static_v6: vec![],
+            },
+            Adapter {
+                index: 3,
+                name: "Wi-Fi".into(),
+                static_v4: vec![],
+                static_v6: vec![],
+            },
+        ];
+        let merged = merge_adapters(recorded, now);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].static_v4, ["1.1.1.1"], "the first record wins");
+        assert_eq!(merged[1].name, "Wi-Fi");
+    }
 
     /// The record v0.0.1 wrote on the owner's machine: `::1` padded with NUL
     /// characters as the "before" IPv6 server. It must restore to DHCP, and

@@ -64,7 +64,9 @@ pub struct AppSettings {
     pub close_to_tray: bool,
     /// Turn on at sign-in, as WARP's "always on".
     pub auto_connect: bool,
-    /// Bumped when a default changes in a way that should reach existing settings.
+    /// Bumped when a default changes in a way that should reach existing
+    /// settings. A file without it is from before versions were written (1).
+    #[serde(default = "first_version")]
     pub version: u32,
 }
 
@@ -85,6 +87,10 @@ impl Default for AppSettings {
             version: SETTINGS_VERSION,
         }
     }
+}
+
+fn first_version() -> u32 {
+    1
 }
 
 /// v2: checking DNSSEC on the device became opt-in. It made the first
@@ -391,6 +397,18 @@ impl Core {
         }
     }
 
+    /// Covers adapters that came up after protection was turned on (Wi-Fi
+    /// joining later): the service calls this every few seconds.
+    pub fn keep_applied(&self) {
+        let s = self.settings();
+        if !self.system_allowed || !s.on || s.mode == Mode::Native || lock(&self.engine).is_none() {
+            return;
+        }
+        if system::uncovered(&["127.0.0.1", "::1"]).is_ok_and(|missing| !missing.is_empty()) {
+            let _ = system::apply_local(&self.data);
+        }
+    }
+
     /// Before the service stops: put the computer's own DNS back, keep the
     /// switch's position so the next start reconnects.
     #[cfg_attr(not(windows), allow(dead_code))] // only the Windows service stops this way
@@ -639,4 +657,29 @@ pub fn machine_data() -> PathBuf {
         .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
         .join("EON")
         .join("DNS")
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A settings file from v0.0.0/v0.0.1 (no version, "local" mode, DNSSEC
+    /// on the device) arrives as DNS-only with DNSSEC on the device off.
+    #[test]
+    fn old_settings_are_brought_forward() {
+        let dir = std::env::temp_dir().join(format!("eon-dns-core-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"engine":{"upstreams":[{"kind":"preset","id":"cloudflare"}],"transport":"https","validate":true,"lists":[],"allow":[],"block":[],"log":false,"cache":4096,"race":2},"on":true,"mode":"local","native_preset":"cloudflare","language":"","close_to_tray":true}"#,
+        )
+        .unwrap();
+        let s = AppSettings::load(&dir);
+        assert_eq!(s.mode, Mode::Dns);
+        assert!(!s.engine.validate);
+        assert_eq!(s.version, SETTINGS_VERSION);
+        assert!(s.auto_connect);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

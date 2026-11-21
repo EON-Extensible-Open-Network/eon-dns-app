@@ -5,6 +5,21 @@ SPDX-FileCopyrightText: 2026 EON contributors
 
 # Changelog
 
+## v0.0.3 — 21 November 2026
+
+Tested on the owner's computer: with WARP on, Roblox, which is blocked by name in Turkey,
+signed in, and its friends, games and pictures loaded. 15 MB went through the tunnel.
+That test also found the two fixes below.
+
+### Fixed
+- **A network adapter that comes up after protection is on is now covered.** Wi-Fi
+  joining later is the common case. Such an adapter kept the router's DNS, which on that
+  network answered blocked names with the operator's block page. The service now checks
+  every 20 seconds and covers it, and records its own settings so they can be put back.
+- **Settings from v0.0.0 and v0.0.1 are brought forward properly.** They carry no
+  version, which was read as the newest, so on-device DNSSEC stayed on and lookups stayed
+  slow.
+
 ## v0.0.2 — 21 November 2026
 
 ### Added

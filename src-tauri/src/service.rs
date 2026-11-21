@@ -83,6 +83,14 @@ fn service_main(_args: Vec<OsString>) {
             std::thread::sleep(Duration::from_hours(6));
         });
     }
+    {
+        // Adapters that come up later (Wi-Fi joining, a cable) are covered too.
+        let core = Arc::clone(&core);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(20));
+            core.keep_applied();
+        });
+    }
     let _ = handle.set_service_status(status(
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
