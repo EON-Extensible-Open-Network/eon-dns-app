@@ -409,6 +409,51 @@ impl Core {
         }
     }
 
+    /// Whether the tunnel still carries traffic well; `None` when there is
+    /// no tunnel to judge. On the owner's network a WARP connection that ran
+    /// fast for its first minutes later took 3-9 s for a TLS handshake and
+    /// 0.8 MB/s, and was fast again the moment it was rebuilt: the service
+    /// rebuilds it when this says no twice running (see `service.rs`).
+    ///
+    /// Every tunnel: no handshake for longer than WireGuard ever goes
+    /// without one (it rekeys every two minutes). WARP also: Cloudflare's
+    /// trace page must answer `warp=on` within three seconds. The other
+    /// tunnels are not probed, because that would send a request to
+    /// Cloudflare the person did not choose.
+    #[cfg(windows)]
+    pub fn tunnel_healthy(&self) -> Option<bool> {
+        let s = self.settings();
+        if !s.on || !s.mode.tunnels() {
+            return None;
+        }
+        // A tunnel that should be up and is not (a rebuild that failed
+        // while the network was away) is unwell too, so it is tried again.
+        let Some(stats) = lock(&self.tunnel)
+            .as_ref()
+            .map(tunnel::windows::Tunnel::stats)
+        else {
+            return Some(false);
+        };
+        if stats.handshake_age.is_some_and(|age| age > 200) {
+            return Some(false);
+        }
+        if s.mode != Mode::Warp {
+            return Some(true);
+        }
+        let took = block(tunnel::warp::probe(std::time::Duration::from_secs(8)));
+        Some(took.is_ok_and(|d| d < std::time::Duration::from_secs(3)))
+    }
+
+    /// Takes the tunnel down and brings it up again, leaving the resolver
+    /// and the switch alone: a rebuild that fails (the network is away) is
+    /// tried again on the next check instead of turning protection off.
+    #[cfg(windows)]
+    pub fn rebuild_tunnel(&self) {
+        let mode = self.settings().mode;
+        self.tunnel_down();
+        *lock(&self.problem) = self.tunnel_up(mode).err();
+    }
+
     /// Before the service stops: put the computer's own DNS back, keep the
     /// switch's position so the next start reconnects.
     #[cfg_attr(not(windows), allow(dead_code))] // only the Windows service stops this way

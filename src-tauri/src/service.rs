@@ -86,9 +86,22 @@ fn service_main(_args: Vec<OsString>) {
     {
         // Adapters that come up later (Wi-Fi joining, a cable) are covered too.
         let core = Arc::clone(&core);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(20));
-            core.keep_applied();
+        std::thread::spawn(move || {
+            let mut unwell = 0;
+            loop {
+                std::thread::sleep(Duration::from_secs(20));
+                core.keep_applied();
+                // A tunnel that has gone slow or quiet is rebuilt, as the
+                // switch would: twice running, so one slow page is not enough.
+                match core.tunnel_healthy() {
+                    Some(false) => unwell += 1,
+                    _ => unwell = 0,
+                }
+                if unwell >= 2 {
+                    unwell = 0;
+                    core.rebuild_tunnel();
+                }
+            }
         });
     }
     let _ = handle.set_service_status(status(

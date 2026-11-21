@@ -102,6 +102,28 @@ fn config_from(value: &Value, private_key: &str) -> Result<TunnelConfig, String>
     Ok(config)
 }
 
+/// Asks Cloudflare's trace page whether this traffic came through WARP and
+/// how long the answer took: a connection that has gone slow or stopped
+/// going through WARP is one to rebuild. Sends nothing about the person.
+pub async fn probe(timeout: Duration) -> Result<Duration, String> {
+    let started = std::time::Instant::now();
+    let body = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| e.to_string())?
+        .get("https://www.cloudflare.com/cdn-cgi/trace")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !body.lines().any(|l| l == "warp=on" || l == "warp=plus") {
+        return Err("traffic is not going through WARP".into());
+    }
+    Ok(started.elapsed())
+}
+
 /// Registers a new device with WARP.
 pub async fn register() -> Result<(WarpAccount, TunnelConfig), String> {
     let (private_key, public_key) = new_keypair();

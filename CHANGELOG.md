@@ -12,6 +12,13 @@ signed in, and its friends, games and pictures loaded. 15 MB went through the tu
 That test also found the two fixes below.
 
 ### Fixed
+- **A tunnel that goes slow is rebuilt by itself.** On the owner's network, a WARP
+  connection that was fast for its first minutes later took 3–9 s per TLS handshake and
+  0.8 MB/s. Rebuilding it brought back 0.07 s and 6–21 MB/s. The service now checks the
+  tunnel every 20 seconds and rebuilds it when two checks in a row fail. A check fails
+  when WireGuard has had no handshake for over 200 s, or, for WARP only, when
+  Cloudflare's trace page does not answer `warp=on` within 3 s. The other tunnels are
+  never probed against Cloudflare.
 - **A network adapter that comes up after protection is on is now covered.** Wi-Fi
   joining later is the common case. Such an adapter kept the router's DNS, which on that
   network answered blocked names with the operator's block page. The service now checks
