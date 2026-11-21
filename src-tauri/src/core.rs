@@ -220,6 +220,7 @@ impl Core {
         }
     }
 
+    #[cfg_attr(not(windows), allow(clippy::unused_self))]
     fn tunnel_down(&self) {
         #[cfg(windows)]
         if let Some(t) = lock(&self.tunnel).take() {
@@ -392,6 +393,7 @@ impl Core {
 
     /// Before the service stops: put the computer's own DNS back, keep the
     /// switch's position so the next start reconnects.
+    #[cfg_attr(not(windows), allow(dead_code))] // only the Windows service stops this way
     pub fn shutdown(&self) {
         let on = self.settings().on;
         let _ = self.disconnect();
