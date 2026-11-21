@@ -1,16 +1,20 @@
-**EON DNS** encrypts every name lookup your computer makes. It sends them to the
-resolvers you choose, checks DNSSEC signatures here, and blocks malware, ads or adult
-sites on this computer, showing why each one was blocked. One switch turns it on. Free,
-open source, no account, no telemetry.
+**EON DNS** is one switch for two jobs.
 
-**Early alpha:** for trying out. Windows can be switched over to it by the program; on
-Linux and macOS the resolver runs on 127.0.0.1, and pointing the system at it is a manual
-step for now.
+**Lookups.** Every name lookup is encrypted to resolvers you choose. Malware, ads or adult
+sites are blocked on your computer, and each block shows why.
 
-**Install:** download the file for your system and run it. Turning protection on asks
-Windows for permission once, to point your DNS at EON DNS, and EON DNS writes down what
-was there before. Turning it off, or quitting, puts that back.
+**The tunnel.** Choose WARP, your own WireGuard server, or an EON server, and *all* your
+traffic goes through it, sealed. It works like Cloudflare's WARP, including for sites that
+are blocked by name.
 
-**Not signed:** EON has no signing keys yet (plan, madde 30 and 34). Check the files
-against `SHA256SUMS.txt`. On Windows, Smart App Control (if on) refuses unsigned
-downloads.
+It is free and open source, with no account and no telemetry.
+
+**Early alpha:** for trying out, on Windows. On Linux and macOS the resolver runs on
+`127.0.0.1`; the tunnel and switching the system over come later.
+
+**Install:** download the file and run it. The first time you press the switch, Windows
+asks once to set up the EON DNS service, which keeps protection on in the background and
+puts your DNS settings back when it stops. After that, the switch asks nothing.
+
+**Not signed:** EON has no signing keys yet (plan madde 30 and 34). Check the files against
+`SHA256SUMS.txt`. On Windows, Smart App Control (if it is on) refuses unsigned downloads.
